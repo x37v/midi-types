@@ -3,5 +3,6 @@
 mod midi;
 
 pub use midi::{
-    status, Channel, Control, MidiMessage, Note, Program, RenderError, Value14, Value7,
+    status, Channel, Control, MidiMessage, Note, Program, RenderError, RenderResult,
+    RepeatableStatus, Value14, Value7,
 };

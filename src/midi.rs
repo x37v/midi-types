@@ -125,6 +125,20 @@ pub enum ParseError {
     PartialData,
 }
 
+/// Status byte repeating data.
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+pub enum RepeatableStatus {
+    ///A status byte that is repeatable
+    Repeatable(u8),
+    ///A status byte that should clear any repeatable status
+    Clear,
+    ///A status byte that shouldn't change any repeatable status
+    Hold,
+}
+
+/// Alias for message render Result
+pub type RenderResult = Result<(usize, RepeatableStatus), RenderError>;
+
 impl MidiMessage {
     /// The length of the rendered data, including the status
     pub fn len(&self) -> usize {
@@ -156,14 +170,22 @@ impl MidiMessage {
         chan: &C,
         d0: &T0,
         d1: &T1,
-    ) -> Result<usize, RenderError> {
+        repeatable: bool,
+    ) -> RenderResult {
         if buf.len() >= 3 {
             let chan: u8 = (*chan).into();
             let status = status | chan;
             for (o, i) in buf.iter_mut().zip(&[status, (*d0).into(), (*d1).into()]) {
                 *o = *i;
             }
-            Ok(3)
+            Ok((
+                3,
+                if repeatable {
+                    RepeatableStatus::Repeatable(status)
+                } else {
+                    RepeatableStatus::Clear
+                },
+            ))
         } else {
             Err(RenderError::BufferTooShort)
         }
@@ -175,48 +197,57 @@ impl MidiMessage {
         status: u8,
         chan: &C,
         d0: &T0,
-    ) -> Result<usize, RenderError> {
+        repeatable: bool,
+    ) -> RenderResult {
         if buf.len() >= 2 {
             let chan: u8 = (*chan).into();
             let status = status | chan;
             for (o, i) in buf.iter_mut().zip(&[status, (*d0).into()]) {
                 *o = *i;
             }
-            Ok(2)
+            Ok((
+                2,
+                if repeatable {
+                    RepeatableStatus::Repeatable(status)
+                } else {
+                    RepeatableStatus::Clear
+                },
+            ))
         } else {
             Err(RenderError::BufferTooShort)
         }
     }
 
     //helper to render 1 byte messages
-    fn chan1byte(buf: &mut [u8], status: u8) -> Result<usize, RenderError> {
+    fn chan1byte(buf: &mut [u8], status: u8) -> RenderResult {
         if buf.len() >= 1 {
             buf[0] = status;
-            Ok(1)
+            Ok((1, RepeatableStatus::Hold))
         } else {
             Err(RenderError::BufferTooShort)
         }
     }
 
     /// Render into a raw byte buffer, return the number of bytes rendered
-    pub fn render(&self, buf: &mut [u8]) -> Result<usize, RenderError> {
+    pub fn render(&self, buf: &mut [u8]) -> RenderResult {
         match self {
-            Self::NoteOff(c, n, v) => Self::chan3byte(buf, NOTE_OFF, c, n, v),
-            Self::NoteOn(c, n, v) => Self::chan3byte(buf, NOTE_ON, c, n, v),
-            Self::KeyPressure(c, n, v) => Self::chan3byte(buf, KEY_PRESSURE, c, n, v),
-            Self::ControlChange(c, n, v) => Self::chan3byte(buf, CONTROL_CHANGE, c, n, v),
+            Self::NoteOff(c, n, v) => Self::chan3byte(buf, NOTE_OFF, c, n, v, true),
+            Self::NoteOn(c, n, v) => Self::chan3byte(buf, NOTE_ON, c, n, v, true),
+
+            Self::KeyPressure(c, n, v) => Self::chan3byte(buf, KEY_PRESSURE, c, n, v, true),
+            Self::ControlChange(c, n, v) => Self::chan3byte(buf, CONTROL_CHANGE, c, n, v, true),
             Self::PitchBendChange(c, v) => {
                 let (v0, v1): (u8, u8) = (*v).into();
-                Self::chan3byte(buf, PITCH_BEND_CHANGE, c, &v0, &v1)
+                Self::chan3byte(buf, PITCH_BEND_CHANGE, c, &v0, &v1, true)
             }
             Self::SongPositionPointer(v) => {
                 let (v0, v1): (u8, u8) = (*v).into();
-                Self::chan3byte(buf, SONG_POSITION_POINTER, &0, &v0, &v1)
+                Self::chan3byte(buf, SONG_POSITION_POINTER, &0, &v0, &v1, false)
             }
-            Self::ProgramChange(c, p) => Self::chan2byte(buf, PROGRAM_CHANGE, c, p),
-            Self::ChannelPressure(c, p) => Self::chan2byte(buf, CHANNEL_PRESSURE, c, p),
-            Self::QuarterFrame(q) => Self::chan2byte(buf, QUARTER_FRAME, &0, q),
-            Self::SongSelect(s) => Self::chan2byte(buf, SONG_SELECT, &0, s),
+            Self::ProgramChange(c, p) => Self::chan2byte(buf, PROGRAM_CHANGE, c, p, true),
+            Self::ChannelPressure(c, p) => Self::chan2byte(buf, CHANNEL_PRESSURE, c, p, true),
+            Self::QuarterFrame(q) => Self::chan2byte(buf, QUARTER_FRAME, &0, q, false),
+            Self::SongSelect(s) => Self::chan2byte(buf, SONG_SELECT, &0, s, false),
             Self::TuneRequest => Self::chan1byte(buf, TUNE_REQUEST),
             Self::TimingClock => Self::chan1byte(buf, TIMING_CLOCK),
             Self::Start => Self::chan1byte(buf, START),
@@ -607,19 +638,42 @@ mod test {
         let mut buf3 = [0, 0, 0];
         let mut buf100 = [0; 100];
         for v in TEST_1BYTE.iter() {
-            assert_eq!(Ok(1), v.render(&mut buf1), "{:?}", v);
-            assert_eq!(Ok(1), v.render(&mut buf2), "{:?}", v);
-            assert_eq!(Ok(1), v.render(&mut buf100), "{:?}", v);
+            assert_eq!(
+                Ok((1, RepeatableStatus::Hold)),
+                v.render(&mut buf1),
+                "{:?}",
+                v
+            );
+            assert_eq!(
+                Ok((1, RepeatableStatus::Hold)),
+                v.render(&mut buf2),
+                "{:?}",
+                v
+            );
+            assert_eq!(
+                Ok((1, RepeatableStatus::Hold)),
+                v.render(&mut buf100),
+                "{:?}",
+                v
+            );
         }
 
         for v in TEST_2BYTE {
-            assert_eq!(Ok(2), v.render(&mut buf2), "{:?}", v);
-            assert_eq!(Ok(2), v.render(&mut buf100), "{:?}", v);
+            let r = v.render(&mut buf2);
+            assert!(r.is_ok(), "{:?}", v);
+            assert_eq!(r.unwrap().0, 2, "{:?}", v);
+            let r = v.render(&mut buf100);
+            assert!(r.is_ok(), "{:?}", v);
+            assert_eq!(r.unwrap().0, 2, "{:?}", v);
         }
 
         for v in TEST_3BYTE {
-            assert_eq!(Ok(3), v.render(&mut buf3), "{:?}", v);
-            assert_eq!(Ok(3), v.render(&mut buf100), "{:?}", v);
+            let r = v.render(&mut buf3);
+            assert!(r.is_ok(), "{:?}", v);
+            assert_eq!(r.unwrap().0, 3, "{:?}", v);
+            let r = v.render(&mut buf100);
+            assert!(r.is_ok(), "{:?}", v);
+            assert_eq!(r.unwrap().0, 3, "{:?}", v);
         }
     }
 
@@ -630,25 +684,25 @@ mod test {
         let mut buf3 = [0, 0, 0];
         let mut buf100 = [0; 100];
         for v in TEST_1BYTE.iter() {
-            assert_eq!(Ok(1), v.render(&mut buf1), "{:?}", v);
+            assert!(v.render(&mut buf1).is_ok(), "{:?}", v);
             assert_eq!(Ok(v.clone()), MidiMessage::try_from(buf1.as_slice()));
-            assert_eq!(Ok(1), v.render(&mut buf2), "{:?}", v);
+            assert!(v.render(&mut buf2).is_ok(), "{:?}", v);
             assert_eq!(Ok(v.clone()), MidiMessage::try_from(buf2.as_slice()));
-            assert_eq!(Ok(1), v.render(&mut buf100), "{:?}", v);
+            assert!(v.render(&mut buf100).is_ok(), "{:?}", v);
             assert_eq!(Ok(v.clone()), MidiMessage::try_from(buf100.as_slice()));
         }
 
         for v in TEST_2BYTE {
-            assert_eq!(Ok(2), v.render(&mut buf2), "{:?}", v);
+            assert!(v.render(&mut buf2).is_ok(), "{:?}", v);
             assert_eq!(Ok(v.clone()), MidiMessage::try_from(buf2.as_slice()));
-            assert_eq!(Ok(2), v.render(&mut buf100), "{:?}", v);
+            assert!(v.render(&mut buf100).is_ok(), "{:?}", v);
             assert_eq!(Ok(v.clone()), MidiMessage::try_from(buf100.as_slice()));
         }
 
         for v in TEST_3BYTE {
-            assert_eq!(Ok(3), v.render(&mut buf3), "{:?}", v);
+            assert!(v.render(&mut buf3).is_ok(), "{:?}", v);
             assert_eq!(Ok(v.clone()), MidiMessage::try_from(buf3.as_slice()));
-            assert_eq!(Ok(3), v.render(&mut buf100), "{:?}", v);
+            assert!(v.render(&mut buf100).is_ok(), "{:?}", v);
             assert_eq!(Ok(v.clone()), MidiMessage::try_from(buf100.as_slice()));
         }
     }
